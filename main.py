@@ -1,6 +1,5 @@
 import os
 os.environ['RTMLIB_CACHE'] = '/workspace/.rtmlib'
-
 import asyncio
 import json
 import httpx
@@ -18,7 +17,6 @@ app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -60,6 +58,7 @@ async def analyze(request: AnalyzeRequest):
 
         frames_data = []
         frame_index = 0
+        last_heartbeat = asyncio.get_event_loop().time()
 
         while True:
             ret, frame = cap.read()
@@ -67,7 +66,6 @@ async def analyze(request: AnalyzeRequest):
                 break
 
             keypoints, scores = pose_model(frame)
-
             landmarks = []
             landmarks_raw = []
             if keypoints is not None and len(keypoints) > 0:
@@ -102,10 +100,17 @@ async def analyze(request: AnalyzeRequest):
                 "total": total_frames
             })
             yield f"data: {msg}\n\n"
+
+            # Heartbeat: send a keepalive comment every ~2s so the HTTP/2
+            # proxy never sees the stream go idle (prevents ERR_HTTP2_PROTOCOL_ERROR)
+            now = asyncio.get_event_loop().time()
+            if now - last_heartbeat > 2.0:
+                yield ": keepalive\n\n"
+                last_heartbeat = now
+
             await asyncio.sleep(0)
 
         cap.release()
-
         result = {
             "type": "complete",
             "frames": frames_data,
@@ -114,4 +119,12 @@ async def analyze(request: AnalyzeRequest):
         }
         yield f"data: {json.dumps(result)}\n\n"
 
-    return StreamingResponse(generate(), media_type="text/event-stream")
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
